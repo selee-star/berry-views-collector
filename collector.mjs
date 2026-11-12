@@ -6,10 +6,12 @@
 
 const WEBAPP_URL = process.env.WEBAPP_URL;
 const COLLECTOR_KEY = process.env.COLLECTOR_KEY;
-const MAX_AGE_MINUTES = Number(process.env.MAX_AGE_MINUTES || 200); // re-check videos older than this
-const DELAY_MS = Number(process.env.DELAY_MS || 1200);              // pause between videos
-const STOP_AFTER_FAILS = 8;                                          // TikTok is refusing us: stop early
-const REPORT_EVERY = 50;
+// Runs once a day and goes slowly on purpose, so TikTok is not asked too often.
+const MAX_AGE_MINUTES = Number(process.env.MAX_AGE_MINUTES || 20 * 60); // re-check videos not updated for 20 hours
+const DELAY_MS = Number(process.env.DELAY_MS || 20000);                 // at least 20 s between videos (+ up to 10 s)
+const RETRY_WAIT_MS = 90000;                                            // after a refusal, wait 90 s before the one retry
+const STOP_AFTER_FAILS = 5;                                             // TikTok keeps refusing: stop, the rest wait for tomorrow
+const REPORT_EVERY = 10;
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -59,11 +61,15 @@ async function fetchStats(url) {
         signal: AbortSignal.timeout(20000),
       });
       if (res.ok) return parseStats(await res.text());
+      console.log(`  TikTok answered HTTP ${res.status}`);
       if (res.status !== 429 && res.status !== 503) return null;
-    } catch {
-      // network hiccup: fall through to retry
+      const after = Number(res.headers.get('retry-after'));
+      if (attempt === 0) await sleep(after > 0 ? Math.min(after * 1000, 300000) : RETRY_WAIT_MS);
+      continue;
+    } catch (err) {
+      console.log(`  Network problem: ${err.message}`);
     }
-    await sleep(15000);
+    if (attempt === 0) await sleep(RETRY_WAIT_MS);
   }
   return null;
 }
@@ -88,10 +94,10 @@ async function main() {
     else { fail += 1; failsInRow += 1; pending.push({ id: v.id, views: null }); }
     if (pending.length >= REPORT_EVERY) await flush(false);
     if (failsInRow >= STOP_AFTER_FAILS) {
-      console.log(`TikTok refused ${STOP_AFTER_FAILS} videos in a row. Stopping this run; the rest wait for the next run.`);
+      console.log(`TikTok refused ${STOP_AFTER_FAILS} videos in a row. Stopping today; the rest are tried in the next run.`);
       break;
     }
-    await sleep(DELAY_MS);
+    await sleep(DELAY_MS + Math.floor(Math.random() * 10000));
   }
   // Marks the final tally as done only when every video was attempted
   await flush(failsInRow < STOP_AFTER_FAILS);
